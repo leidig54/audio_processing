@@ -129,7 +129,7 @@ def process_notched(bucket, mask_name, blob_list, filepath):
 
     # Generate notch frequency list
     frequency_list = []
-    q_factor = 30
+    q_factor = 20
 
     # Low frequencies
     for i in range(20, 200, 20):
