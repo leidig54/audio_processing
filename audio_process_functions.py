@@ -129,7 +129,7 @@ def process_notched(bucket, mask_name, blob_list, filepath):
 
     # Generate notch frequency list
     frequency_list = []
-    q_factor = 20
+    q_factor = 5
 
     # Low frequencies
     for i in range(20, 200, 20):
@@ -184,12 +184,12 @@ def process_notched(bucket, mask_name, blob_list, filepath):
             frequency, mask_name)
 
         # Read wav file
-        sample_rate, data = read("temp.wav")
+        sample_rate, new_data = read("temp.wav")
 
         # Get an audacity-style spectrogram
         s = 1024
         freqs, bins, pxx, = signal.spectrogram(
-            data[:, 1], fs=sample_rate, window=signal.blackmanharris(s), nfft=s, noverlap=0, mode='magnitude')
+            new_data[:, 1], fs=sample_rate, window=signal.blackmanharris(s), nfft=s, noverlap=0, mode='magnitude')
 
         # Create a json file with the spectrogram values
         values = 20 * log10(mean(pxx, axis=1))
@@ -210,11 +210,114 @@ def process_notched(bucket, mask_name, blob_list, filepath):
         os.remove("temp.wav")
 
 
+def butter_bandstop_filter(data, lowcut, highcut, fs):
+
+    order = 1
+
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+
+    i, u = signal.butter(order, [low, high], btype='bandstop')
+    y = signal.lfilter(i, u, data)
+    return y
+
+
+def process_bandstop(bucket, mask_name, blob_list, filepath):
+    # Generate notch frequency list
+    frequency_list = []
+
+    # Low frequencies
+    for i in range(20, 200, 20):
+        frequency_list.append(i)
+
+    # Mid frequencies
+    for i in range(200, 1000, 100):
+        frequency_list.append(i)
+
+    # High frequencies
+    for i in range(1000, 16000, 1000):
+        frequency_list.append(i)
+
+    # Read wav
+    sample_rate, data = read(filepath)
+
+    for frequency in frequency_list:
+
+        f1 = frequency * 0.7
+        f2 = frequency * 1.3
+
+        # Name the new blob
+        new_blob_name = "sound_therapy/audio/notched/{}/{}.mp3".format(
+            frequency, mask_name)
+
+        # Notch the individual audio files
+        result_left = butter_bandstop_filter(
+            data[:, 0], f1, f2, sample_rate)
+        result_right = butter_bandstop_filter(
+            data[:, 1], f1, f2, sample_rate)
+
+        print("Mask: " + str(mask_name) + ", Algorithm: Notched" + ", Frequency: " +
+              str(frequency))
+
+        # Generate wav and convert to mp3
+        joined = np.transpose(
+            np.array([result_left, result_right]))
+
+        write("{}_{}.wav".format(mask_name, frequency),
+              sample_rate, joined.astype(np.int32))
+        sound = AudioSegment.from_wav("{}_{}.wav".format(mask_name, frequency))
+        sound.export("{}_{}.mp3".format(mask_name, frequency),
+                     format="mp3", bitrate="180")
+
+        # Check if blob has previously been uploaded and delete it if found
+        check_and_delete(new_blob_name=new_blob_name,
+                         blob_list=blob_list, bucket=bucket)
+
+        # Upload new blob
+        blob = bucket.blob(new_blob_name)
+        blob.upload_from_filename("{}_{}.mp3".format(mask_name, frequency))
+
+        # Delete temporary mp3
+        os.remove("{}_{}.mp3".format(mask_name, frequency))
+
+        # Get spectrogram for notched audio
+        spectrogram_blob_name = "sound_therapy/spectrograms/notched/{}/{}.json".format(
+            frequency, mask_name)
+
+        # Read wav file
+        sample_rate, notched_data = read(
+            "{}_{}.wav".format(mask_name, frequency))
+
+        # Get an audacity-style spectrogram
+        s = 1024
+        freqs, bins, pxx, = signal.spectrogram(
+            notched_data[:, 1], fs=sample_rate, window=signal.blackmanharris(s), nfft=s, noverlap=0, mode='magnitude')
+
+        # Create a json file with the spectrogram values
+        values = 20 * log10(mean(pxx, axis=1))
+
+        json.dump(np.array(values).tolist(), codecs.open("{}_{}.json".format(mask_name, frequency), 'w', encoding='utf-8'),
+                  separators=(',', ':'), sort_keys=True, indent=4)
+
+        # Check if blob has previously been uploaded and delete it if found
+        check_and_delete(new_blob_name=spectrogram_blob_name,
+                         blob_list=blob_list, bucket=bucket)
+
+        # Upload new blob
+        blob = bucket.blob(spectrogram_blob_name)
+        blob.upload_from_filename("{}_{}.json".format(mask_name, frequency))
+
+        # Delete temporary json
+        os.remove("{}_{}.json".format(mask_name, frequency))
+        os.remove("{}_{}.wav".format(mask_name, frequency))
+
+
 def process_peaked(bucket, mask_name, blob_list, filepath):
 
     # Generate notch frequency list
     frequency_list = []
-    q_factor = 1
+    q_factor = 10
     # Low frequencies
     for i in range(20, 200, 20):
         frequency_list.append(i)
@@ -247,18 +350,18 @@ def process_peaked(bucket, mask_name, blob_list, filepath):
             data[:, 1], sample_rate, frequency, q_factor)
 
         # Add the peak-filtered audio to the original audio
-        combined_audio_left = (peaked_left) + data[:, 0]
-        combined_audio_right = (peaked_right) + data[:, 1]
+        # combined_audio_left = (peaked_left) + data[:, 0]
+        # combined_audio_right = (peaked_right) + data[:, 1]
 
         # Get the max amplitude of the new audio file
         new_max_amplitude = max(
-            [max(abs(combined_audio_left)), max(abs(combined_audio_right))])
+            [max(abs(peaked_left)), max(abs(peaked_right))])
 
         # Derive a scale-factor to apply to the new audio
         scale_factor = original_max_amplitude/new_max_amplitude
 
         joined = np.transpose(
-            np.array([combined_audio_left, combined_audio_right]))
+            np.array([peaked_left, peaked_right]))
 
         # Apply the scale factor
         scaled_joined = joined * scale_factor
@@ -284,12 +387,12 @@ def process_peaked(bucket, mask_name, blob_list, filepath):
         spectrogram_blob_name = "sound_therapy/spectrograms/peaked/{}/{}.json".format(
             frequency, mask_name)
 
-        sample_rate, data = read("temp.wav")
+        sample_rate, new_data = read("temp.wav")
 
         # Get spectrogram of peaked audio
         s = 1024
         freqs, bins, pxx, = signal.spectrogram(
-            data[:, 1], fs=sample_rate, window=signal.blackmanharris(s), nfft=s, noverlap=0, mode='magnitude')
+            new_data[:, 1], fs=sample_rate, window=signal.blackmanharris(s), nfft=s, noverlap=0, mode='magnitude')
 
         # Save spectrogram values as a json file
         values = 20 * log10(mean(pxx, axis=1))
